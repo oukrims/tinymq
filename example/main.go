@@ -13,13 +13,21 @@ func main() {
 	logger := log.New(os.Stdout, "[tinymq] ", log.LstdFlags)
 	tinymq.SetLogger(logger)
 
-	q := tinymq.NewQueue(100)
+	// Example with custom scheduler interval for time-sensitive jobs
+	config := tinymq.Config{
+		BufferSize:        100,
+		SchedulerInterval: 50 * time.Millisecond, // More responsive than default 100ms
+	}
+	q := tinymq.NewQueueWithConfig(config)
 	defer q.Stop()
+
+	// Alternative: use default config
+	// q := tinymq.NewQueue(100)
 
 	q.RegisterExecutor("process", func(job tinymq.Job) error {
 		fmt.Printf("[EXEC] %v Priority - Job %s: %v\n",
 			job.Priority, job.ID[:8], job.Payload)
-		time.Sleep(100 * time.Millisecond) // Simulate work
+		time.Sleep(100 * time.Millisecond)
 		return nil
 	})
 
@@ -27,7 +35,6 @@ func main() {
 
 	fmt.Println("=== Enqueueing mixed priority jobs ===")
 
-	// Enqueue jobs in mixed order
 	jobs := []struct {
 		priority string
 		job      tinymq.Job
@@ -46,17 +53,16 @@ func main() {
 		q.Enqueue(j.job)
 	}
 
-	fmt.Println("\n=== Priority with delayed jobs ===")
+	fmt.Println("\n=== Priority with delayed jobs (faster scheduling) ===")
 
-	// Delayed jobs with different priorities
 	delayedJobs := []struct {
 		priority string
 		job      tinymq.Job
 		delay    time.Duration
 	}{
-		{"Low", tinymq.NewLowPriorityJob("process", "Delayed low priority"), 500 * time.Millisecond},
-		{"High", tinymq.NewHighPriorityJob("process", "Delayed high priority"), 500 * time.Millisecond},
-		{"Medium", tinymq.NewJob("process", "Delayed medium priority"), 500 * time.Millisecond},
+		{"Low", tinymq.NewLowPriorityJob("process", "Delayed low priority"), 200 * time.Millisecond},
+		{"High", tinymq.NewHighPriorityJob("process", "Delayed high priority"), 200 * time.Millisecond},
+		{"Medium", tinymq.NewJob("process", "Delayed medium priority"), 200 * time.Millisecond},
 	}
 
 	for _, j := range delayedJobs {
@@ -73,6 +79,6 @@ func main() {
 	q.Enqueue(*chainedJobPtr)
 
 	fmt.Println("\nWatching execution order (High → Medium → Low)...")
-	time.Sleep(3 * time.Second)
+	time.Sleep(2 * time.Second)
 	fmt.Println("Done!")
 }

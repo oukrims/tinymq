@@ -38,27 +38,34 @@ func (dq *delayedQueue) Pop() interface{} {
 }
 
 type JobQueue struct {
-	highQueue   chan Job
-	mediumQueue chan Job
-	lowQueue    chan Job
-	executors   map[string]ExecutorFunc
-	mu          sync.RWMutex
-	workers     int
-	store       Persistence
-	delayedJobs delayedQueue
-	delayedMu   sync.Mutex
-	stopCh      chan struct{}
+	highQueue         chan Job
+	mediumQueue       chan Job
+	lowQueue          chan Job
+	executors         map[string]ExecutorFunc
+	mu                sync.RWMutex
+	workers           int
+	store             Persistence
+	delayedJobs       delayedQueue
+	delayedMu         sync.Mutex
+	stopCh            chan struct{}
+	schedulerInterval time.Duration
 }
 
 func NewJobQueue(bufferSize int) *JobQueue {
+	config := NewConfigWithBufferSize(bufferSize)
+	return NewJobQueueWithConfig(config)
+}
+
+func NewJobQueueWithConfig(config Config) *JobQueue {
 	jq := &JobQueue{
-		highQueue:   make(chan Job, bufferSize/3+bufferSize%3),
-		mediumQueue: make(chan Job, bufferSize/3),
-		lowQueue:    make(chan Job, bufferSize/3),
-		executors:   make(map[string]ExecutorFunc),
-		workers:     1,
-		delayedJobs: make(delayedQueue, 0),
-		stopCh:      make(chan struct{}),
+		highQueue:         make(chan Job, config.BufferSize/3+config.BufferSize%3),
+		mediumQueue:       make(chan Job, config.BufferSize/3),
+		lowQueue:          make(chan Job, config.BufferSize/3),
+		executors:         make(map[string]ExecutorFunc),
+		workers:           1,
+		delayedJobs:       make(delayedQueue, 0),
+		stopCh:            make(chan struct{}),
+		schedulerInterval: config.SchedulerInterval,
 	}
 	heap.Init(&jq.delayedJobs)
 	go jq.schedulerLoop()
@@ -134,7 +141,7 @@ func (jq *JobQueue) enqueueDelayed(job Job) {
 }
 
 func (jq *JobQueue) schedulerLoop() {
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(jq.schedulerInterval)
 	defer ticker.Stop()
 
 	for {
