@@ -238,42 +238,39 @@ func (jq *JobQueue) Stop() {
 	close(jq.lowQueue)
 }
 
+func (jq *JobQueue) selectNextJob() (Job, bool) {
+	// Always check high priority first
+	select {
+	case job, ok := <-jq.highQueue:
+		return job, ok
+	default:
+	}
+
+	// If no high priority job, check high and medium
+	select {
+	case job, ok := <-jq.highQueue:
+		return job, ok
+	case job, ok := <-jq.mediumQueue:
+		return job, ok
+	default:
+	}
+
+	// If no high or medium priority job, check all queues
+	select {
+	case job, ok := <-jq.highQueue:
+		return job, ok
+	case job, ok := <-jq.mediumQueue:
+		return job, ok
+	case job, ok := <-jq.lowQueue:
+		return job, ok
+	}
+}
+
 func (jq *JobQueue) worker(id int) {
 	for {
-		var job Job
-		var ok bool
-
-		select {
-		case job, ok = <-jq.highQueue:
-			if !ok {
-				return
-			}
-		default:
-			select {
-			case job, ok = <-jq.highQueue:
-				if !ok {
-					return
-				}
-			case job, ok = <-jq.mediumQueue:
-				if !ok {
-					return
-				}
-			default:
-				select {
-				case job, ok = <-jq.highQueue:
-					if !ok {
-						return
-					}
-				case job, ok = <-jq.mediumQueue:
-					if !ok {
-						return
-					}
-				case job, ok = <-jq.lowQueue:
-					if !ok {
-						return
-					}
-				}
-			}
+		job, ok := jq.selectNextJob()
+		if !ok {
+			return
 		}
 
 		jq.mu.RLock()
