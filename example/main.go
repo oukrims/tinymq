@@ -1,10 +1,8 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"log"
-	"math/rand"
 	"os"
 	"time"
 
@@ -18,53 +16,63 @@ func main() {
 	q := tinymq.NewQueue(100)
 	defer q.Stop()
 
-	q.RegisterExecutor("reliable", func(job tinymq.Job) error {
-		fmt.Printf("[RELIABLE] Processing job %s: %v\n", job.ID, job.Payload)
+	q.RegisterExecutor("process", func(job tinymq.Job) error {
+		fmt.Printf("[EXEC] %v Priority - Job %s: %v\n",
+			job.Priority, job.ID[:8], job.Payload)
+		time.Sleep(100 * time.Millisecond) // Simulate work
 		return nil
-	})
-
-	q.RegisterExecutor("flaky", func(job tinymq.Job) error {
-		fmt.Printf("[FLAKY] Attempt %d for job %s: %v\n", job.Retries+1, job.ID, job.Payload)
-
-		if rand.Float32() < 0.7 { // 70% failure rate
-			return errors.New("random failure occurred")
-		}
-
-		fmt.Printf("[FLAKY] Success on attempt %d!\n", job.Retries+1)
-		return nil
-	})
-
-	q.RegisterExecutor("always-fails", func(job tinymq.Job) error {
-		fmt.Printf("[FAIL] Attempt %d for job %s: %v\n", job.Retries+1, job.ID, job.Payload)
-		return errors.New("this job always fails")
 	})
 
 	q.StartDispatcher(2)
 
-	// Reliable job
-	job1 := tinymq.NewJob("reliable", "This will work")
-	q.Enqueue(job1)
+	fmt.Println("=== Enqueueing mixed priority jobs ===")
 
-	// Flaky job with default retry config
-	job2 := tinymq.NewJob("flaky", "This might work after retries")
-	q.Enqueue(job2)
+	// Enqueue jobs in mixed order
+	jobs := []struct {
+		priority string
+		job      tinymq.Job
+	}{
+		{"Low", tinymq.NewLowPriorityJob("process", "Background cleanup")},
+		{"High", tinymq.NewHighPriorityJob("process", "Critical alert!")},
+		{"Medium", tinymq.NewJob("process", "Regular processing")},
+		{"Low", tinymq.NewLowPriorityJob("process", "Archive old data")},
+		{"High", tinymq.NewHighPriorityJob("process", "Emergency fix!")},
+		{"Medium", tinymq.NewJob("process", "User notification")},
+		{"Low", tinymq.NewLowPriorityJob("process", "Generate reports")},
+	}
 
-	// Flaky job with custom retry config
-	job3 := tinymq.NewJob("flaky", "Custom retry config")
-	job3.WithRetryConfig(tinymq.RetryConfig{
-		MaxRetries:      5,
-		InitialDelay:    200 * time.Millisecond,
-		MaxDelay:        2 * time.Second,
-		BackoffMultiple: 1.5,
-	})
-	q.Enqueue(job3)
+	for _, j := range jobs {
+		fmt.Printf("Enqueuing %s priority: %v\n", j.priority, j.job.Payload)
+		q.Enqueue(j.job)
+	}
 
-	// Job that will exhaust retries
-	job4 := tinymq.NewJob("always-fails", "This will fail permanently")
-	job4.WithMaxRetries(2)
-	q.Enqueue(job4)
+	fmt.Println("\n=== Priority with delayed jobs ===")
 
-	fmt.Println("Jobs enqueued. Watching execution...")
-	time.Sleep(15 * time.Second)
+	// Delayed jobs with different priorities
+	delayedJobs := []struct {
+		priority string
+		job      tinymq.Job
+		delay    time.Duration
+	}{
+		{"Low", tinymq.NewLowPriorityJob("process", "Delayed low priority"), 500 * time.Millisecond},
+		{"High", tinymq.NewHighPriorityJob("process", "Delayed high priority"), 500 * time.Millisecond},
+		{"Medium", tinymq.NewJob("process", "Delayed medium priority"), 500 * time.Millisecond},
+	}
+
+	for _, j := range delayedJobs {
+		fmt.Printf("Scheduling %s priority in %v: %v\n", j.priority, j.delay, j.job.Payload)
+		q.EnqueueDelayed(j.job, j.delay)
+	}
+
+	fmt.Println("\n=== Chaining priority methods ===")
+
+	chainedJob := tinymq.NewJob("process", "Chained job")
+	chainedJobPtr := &chainedJob
+
+	chainedJobPtr.WithHighPriority().WithMaxRetries(5)
+	q.Enqueue(*chainedJobPtr)
+
+	fmt.Println("\nWatching execution order (High → Medium → Low)...")
+	time.Sleep(3 * time.Second)
 	fmt.Println("Done!")
 }

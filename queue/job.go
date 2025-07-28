@@ -14,6 +14,19 @@ const (
 	High
 )
 
+func (p Priority) String() string {
+	switch p {
+	case Low:
+		return "Low"
+	case Medium:
+		return "Medium"
+	case High:
+		return "High"
+	default:
+		return "Unknown"
+	}
+}
+
 type RetryConfig struct {
 	MaxRetries      int
 	InitialDelay    time.Duration
@@ -53,6 +66,33 @@ func NewJob(jobType string, payload any) Job {
 		Retries:     0,
 		RetryConfig: DefaultRetryConfig,
 	}
+}
+
+func NewHighPriorityJob(jobType string, payload any) Job {
+	job := NewJob(jobType, payload)
+	job.Priority = High
+	return job
+}
+
+func NewLowPriorityJob(jobType string, payload any) Job {
+	job := NewJob(jobType, payload)
+	job.Priority = Low
+	return job
+}
+
+func (j *Job) WithPriority(priority Priority) *Job {
+	j.Priority = priority
+	return j
+}
+
+func (j *Job) WithHighPriority() *Job {
+	j.Priority = High
+	return j
+}
+
+func (j *Job) WithLowPriority() *Job {
+	j.Priority = Low
+	return j
 }
 
 func (j *Job) WithRetryConfig(config RetryConfig) *Job {

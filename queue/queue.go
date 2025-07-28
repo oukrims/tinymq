@@ -38,7 +38,9 @@ func (dq *delayedQueue) Pop() interface{} {
 }
 
 type JobQueue struct {
-	queue       chan Job
+	highQueue   chan Job
+	mediumQueue chan Job
+	lowQueue    chan Job
 	executors   map[string]ExecutorFunc
 	mu          sync.RWMutex
 	workers     int
@@ -50,7 +52,9 @@ type JobQueue struct {
 
 func NewJobQueue(bufferSize int) *JobQueue {
 	jq := &JobQueue{
-		queue:       make(chan Job, bufferSize),
+		highQueue:   make(chan Job, bufferSize/3+bufferSize%3),
+		mediumQueue: make(chan Job, bufferSize/3),
+		lowQueue:    make(chan Job, bufferSize/3),
 		executors:   make(map[string]ExecutorFunc),
 		workers:     1,
 		delayedJobs: make(delayedQueue, 0),
@@ -81,13 +85,37 @@ func (jq *JobQueue) Enqueue(job Job) {
 	if jq.store != nil {
 		_ = jq.store.Save(job)
 	}
-	jq.queue <- job
-	shared.Logf("Job enqueued: %s", job.ID)
+
+	jq.enqueueByPriority(job)
+	shared.Logf("Job enqueued with priority %v: %s", job.Priority, job.ID)
 }
 
 func (jq *JobQueue) EnqueueDelayed(job Job, delay time.Duration) {
 	job.RunAt = time.Now().Add(delay)
 	jq.enqueueDelayed(job)
+}
+
+func (jq *JobQueue) enqueueByPriority(job Job) {
+	switch job.Priority {
+	case High:
+		select {
+		case jq.highQueue <- job:
+		default:
+			shared.Logf("High priority queue full, dropping job: %s", job.ID)
+		}
+	case Medium:
+		select {
+		case jq.mediumQueue <- job:
+		default:
+			shared.Logf("Medium priority queue full, dropping job: %s", job.ID)
+		}
+	case Low:
+		select {
+		case jq.lowQueue <- job:
+		default:
+			shared.Logf("Low priority queue full, dropping job: %s", job.ID)
+		}
+	}
 }
 
 func (jq *JobQueue) enqueueDelayed(job Job) {
@@ -131,15 +159,42 @@ func (jq *JobQueue) processDelayedJobs() {
 		}
 
 		scheduledJob := heap.Pop(&jq.delayedJobs).(*scheduledJob)
-		select {
-		case jq.queue <- scheduledJob.job:
-			shared.Logf("Delayed job moved to queue: %s", scheduledJob.job.ID)
-		default:
+
+		if jq.tryEnqueueByPriority(scheduledJob.job) {
+			shared.Logf("Delayed job moved to priority queue: %s", scheduledJob.job.ID)
+		} else {
 			heap.Push(&jq.delayedJobs, scheduledJob)
-			shared.Logf("Queue full, rescheduling job: %s", scheduledJob.job.ID)
+			shared.Logf("Priority queues full, rescheduling job: %s", scheduledJob.job.ID)
 			return
 		}
 	}
+}
+
+func (jq *JobQueue) tryEnqueueByPriority(job Job) bool {
+	switch job.Priority {
+	case High:
+		select {
+		case jq.highQueue <- job:
+			return true
+		default:
+			return false
+		}
+	case Medium:
+		select {
+		case jq.mediumQueue <- job:
+			return true
+		default:
+			return false
+		}
+	case Low:
+		select {
+		case jq.lowQueue <- job:
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 func (jq *JobQueue) StartDispatcher(workerCount int) {
@@ -151,7 +206,69 @@ func (jq *JobQueue) StartDispatcher(workerCount int) {
 
 func (jq *JobQueue) Stop() {
 	close(jq.stopCh)
-	close(jq.queue)
+	close(jq.highQueue)
+	close(jq.mediumQueue)
+	close(jq.lowQueue)
+}
+
+func (jq *JobQueue) worker(id int) {
+	for {
+		var job Job
+		var ok bool
+
+		select {
+		case job, ok = <-jq.highQueue:
+			if !ok {
+				return
+			}
+		default:
+			select {
+			case job, ok = <-jq.highQueue:
+				if !ok {
+					return
+				}
+			case job, ok = <-jq.mediumQueue:
+				if !ok {
+					return
+				}
+			default:
+				select {
+				case job, ok = <-jq.highQueue:
+					if !ok {
+						return
+					}
+				case job, ok = <-jq.mediumQueue:
+					if !ok {
+						return
+					}
+				case job, ok = <-jq.lowQueue:
+					if !ok {
+						return
+					}
+				}
+			}
+		}
+
+		jq.mu.RLock()
+		executor, exists := jq.executors[job.Type]
+		jq.mu.RUnlock()
+
+		if exists {
+			go func(j Job) {
+				shared.Logf("[Worker %d] Executing %v priority job: %s (attempt %d)",
+					id, j.Priority, j.ID, j.Retries+1)
+				err := executor(j)
+
+				if err != nil {
+					jq.handleJobFailure(j, err)
+				} else {
+					jq.handleJobSuccess(j)
+				}
+			}(job)
+		} else {
+			shared.Logf("[Worker %d] No executor found for job type '%s'", id, job.Type)
+		}
+	}
 }
 
 func (jq *JobQueue) handleJobSuccess(job Job) {
@@ -180,27 +297,4 @@ func (jq *JobQueue) handleJobFailure(job Job, err error) {
 		job.Retries, job.RetryConfig.MaxRetries, retryDelay, job.ID, err)
 
 	jq.enqueueDelayed(job)
-}
-
-func (jq *JobQueue) worker(id int) {
-	for job := range jq.queue {
-		jq.mu.RLock()
-		executor, exists := jq.executors[job.Type]
-		jq.mu.RUnlock()
-
-		if exists {
-			go func(j Job) {
-				shared.Logf("[Worker %d] Executing job: %s (attempt %d)", id, j.ID, j.Retries+1)
-				err := executor(j)
-
-				if err != nil {
-					jq.handleJobFailure(j, err)
-				} else {
-					jq.handleJobSuccess(j)
-				}
-			}(job)
-		} else {
-			shared.Logf("[Worker %d] No executor found for job type '%s'", id, job.Type)
-		}
-	}
 }
