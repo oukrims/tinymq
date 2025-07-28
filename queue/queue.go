@@ -2,6 +2,8 @@ package queue
 
 import (
 	"container/heap"
+	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -37,11 +39,17 @@ func (dq *delayedQueue) Pop() interface{} {
 	return item
 }
 
+type executorInfo struct {
+	fn        ExecutorFunc
+	config    ExecutorConfig
+	semaphore chan struct{}
+}
+
 type JobQueue struct {
 	highQueue         chan Job
 	mediumQueue       chan Job
 	lowQueue          chan Job
-	executors         map[string]ExecutorFunc
+	executors         map[string]*executorInfo
 	mu                sync.RWMutex
 	workers           int
 	store             Persistence
@@ -62,7 +70,7 @@ func NewJobQueueWithConfig(config Config) *JobQueue {
 		highQueue:         make(chan Job, config.BufferSize/3+config.BufferSize%3),
 		mediumQueue:       make(chan Job, config.BufferSize/3),
 		lowQueue:          make(chan Job, config.BufferSize/3),
-		executors:         make(map[string]ExecutorFunc),
+		executors:         make(map[string]*executorInfo),
 		workers:           1,
 		delayedJobs:       make(delayedQueue, 0),
 		stopCh:            make(chan struct{}),
@@ -79,29 +87,41 @@ func (jq *JobQueue) SetPersistence(p Persistence) {
 }
 
 func (jq *JobQueue) RegisterExecutor(jobType string, executor ExecutorFunc) {
-	jq.mu.Lock()
-	defer jq.mu.Unlock()
-	jq.executors[jobType] = executor
-	shared.Logf("Registered executor for type: %s", jobType)
+	jq.RegisterExecutorWithConfig(jobType, executor, DefaultExecutorConfig())
 }
 
-func (jq *JobQueue) Enqueue(job Job) {
+func (jq *JobQueue) RegisterExecutorWithConfig(jobType string, executor ExecutorFunc, config ExecutorConfig) {
+	jq.mu.Lock()
+	defer jq.mu.Unlock()
+
+	jq.executors[jobType] = &executorInfo{
+		fn:        executor,
+		config:    config,
+		semaphore: make(chan struct{}, config.MaxConcurrentJobs),
+	}
+	shared.Logf("Registered executor for type: %s (max concurrent: %d)", jobType, config.MaxConcurrentJobs)
+}
+
+func (jq *JobQueue) Enqueue(job Job) error {
 	if job.RunAt.After(time.Now()) {
-		jq.enqueueDelayed(job)
-		return
+		return jq.enqueueDelayed(job)
 	}
 
 	if jq.store != nil {
-		_ = jq.store.Save(job)
+		if err := jq.store.Save(job); err != nil {
+			shared.Logf("Failed to persist job %s: %v", job.ID, err)
+			return fmt.Errorf("failed to persist job: %w", err)
+		}
 	}
 
 	jq.enqueueByPriority(job)
 	shared.Logf("Job enqueued with priority %v: %s", job.Priority, job.ID)
+	return nil
 }
 
-func (jq *JobQueue) EnqueueDelayed(job Job, delay time.Duration) {
+func (jq *JobQueue) EnqueueDelayed(job Job, delay time.Duration) error {
 	job.RunAt = time.Now().Add(delay)
-	jq.enqueueDelayed(job)
+	return jq.enqueueDelayed(job)
 }
 
 func (jq *JobQueue) enqueueByPriority(job Job) {
@@ -127,12 +147,15 @@ func (jq *JobQueue) enqueueByPriority(job Job) {
 	}
 }
 
-func (jq *JobQueue) enqueueDelayed(job Job) {
+func (jq *JobQueue) enqueueDelayed(job Job) error {
 	jq.delayedMu.Lock()
 	defer jq.delayedMu.Unlock()
 
 	if jq.store != nil {
-		_ = jq.store.Save(job)
+		if err := jq.store.Save(job); err != nil {
+			shared.Logf("Failed to persist delayed job %s: %v", job.ID, err)
+			return fmt.Errorf("failed to persist delayed job: %w", err)
+		}
 	}
 
 	// Check if we have a limit (0 means unlimited)
@@ -158,6 +181,7 @@ func (jq *JobQueue) enqueueDelayed(job Job) {
 		runAt: job.RunAt,
 	})
 	shared.Logf("Job scheduled for %v: %s", job.RunAt, job.ID)
+	return nil
 }
 
 func (jq *JobQueue) schedulerLoop() {
@@ -274,31 +298,63 @@ func (jq *JobQueue) worker(id int) {
 		}
 
 		jq.mu.RLock()
-		executor, exists := jq.executors[job.Type]
+		executorInfo, exists := jq.executors[job.Type]
 		jq.mu.RUnlock()
 
 		if exists {
-			go func(j Job) {
-				shared.Logf("[Worker %d] Executing %v priority job: %s (attempt %d)",
-					id, j.Priority, j.ID, j.Retries+1)
-				err := executor(j)
-
-				if err != nil {
-					jq.handleJobFailure(j, err)
-				} else {
-					jq.handleJobSuccess(j)
-				}
-			}(job)
+			go jq.executeJob(id, job, executorInfo)
 		} else {
 			shared.Logf("[Worker %d] No executor found for job type '%s'", id, job.Type)
 		}
 	}
 }
 
+func (jq *JobQueue) executeJob(workerID int, job Job, execInfo *executorInfo) {
+	// Acquire semaphore to limit concurrent executions
+	select {
+	case execInfo.semaphore <- struct{}{}:
+		defer func() { <-execInfo.semaphore }()
+	default:
+		// Semaphore full, re-queue the job with a small delay
+		shared.Logf("[Worker %d] Executor for %s at capacity, re-queuing job: %s", workerID, job.Type, job.ID)
+		job.RunAt = time.Now().Add(100 * time.Millisecond)
+		jq.enqueueDelayed(job)
+		return
+	}
+
+	shared.Logf("[Worker %d] Executing %v priority job: %s (attempt %d)",
+		workerID, job.Priority, job.ID, job.Retries+1)
+
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), execInfo.config.Timeout)
+	defer cancel()
+
+	// Execute with timeout
+	done := make(chan error, 1)
+	go func() {
+		done <- execInfo.fn(job)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			jq.handleJobFailure(job, err)
+		} else {
+			jq.handleJobSuccess(job)
+		}
+	case <-ctx.Done():
+		err := fmt.Errorf("job execution timed out after %v", execInfo.config.Timeout)
+		shared.Logf("[Worker %d] Job %s timed out", workerID, job.ID)
+		jq.handleJobFailure(job, err)
+	}
+}
+
 func (jq *JobQueue) handleJobSuccess(job Job) {
 	shared.Logf("Job completed successfully: %s", job.ID)
 	if jq.store != nil {
-		_ = jq.store.Delete(job.ID)
+		if err := jq.store.Delete(job.ID); err != nil {
+			shared.Logf("Failed to delete completed job %s from persistence: %v", job.ID, err)
+		}
 	}
 }
 
@@ -309,7 +365,9 @@ func (jq *JobQueue) handleJobFailure(job Job, err error) {
 	if job.Retries > job.RetryConfig.MaxRetries {
 		shared.Logf("Job failed permanently after %d retries: %s - %v", job.RetryConfig.MaxRetries, job.ID, err)
 		if jq.store != nil {
-			_ = jq.store.Delete(job.ID)
+			if deleteErr := jq.store.Delete(job.ID); deleteErr != nil {
+				shared.Logf("Failed to delete failed job %s from persistence: %v", job.ID, deleteErr)
+			}
 		}
 		return
 	}
@@ -320,5 +378,7 @@ func (jq *JobQueue) handleJobFailure(job Job, err error) {
 	shared.Logf("Job failed, scheduling retry %d/%d in %v: %s - %v",
 		job.Retries, job.RetryConfig.MaxRetries, retryDelay, job.ID, err)
 
-	jq.enqueueDelayed(job)
+	if retryErr := jq.enqueueDelayed(job); retryErr != nil {
+		shared.Logf("Failed to schedule retry for job %s: %v", job.ID, retryErr)
+	}
 }

@@ -25,8 +25,26 @@ func main() {
 	// Alternative: use default config
 	// q := tinymq.NewQueue(100)
 
-	q.RegisterExecutor("process", func(job tinymq.Job) error {
+	// Register executor with concurrency limits and timeout
+	execConfig := tinymq.ExecutorConfig{
+		MaxConcurrentJobs: 3, // Limit to 3 concurrent executions
+		Timeout:           5 * time.Second,
+	}
+
+	q.RegisterExecutorWithConfig("process", func(job tinymq.Job) error {
 		fmt.Printf("[EXEC] %v Priority - Job %s: %v\n",
+			job.Priority, job.ID[:8], job.Payload)
+		time.Sleep(100 * time.Millisecond)
+		return nil
+	}, execConfig)
+
+	// Also register a simple executor for comparison
+	q.RegisterExecutor("simple", func(job tinymq.Job) error {
+		fmt.Printf("[SIMPLE] Job %s: %v\n", job.ID[:8], job.Payload)
+		return nil
+	})
+	q.RegisterExecutor("log", func(job tinymq.Job) error {
+		fmt.Printf("[LOG] %v Priority - Job %s: %v\n",
 			job.Priority, job.ID[:8], job.Payload)
 		time.Sleep(100 * time.Millisecond)
 		return nil
@@ -81,11 +99,16 @@ func main() {
 
 	fmt.Println("\nWatching execution order (High → Medium → Low)...")
 
-	// Show queue stats
+	// Show queue stats including executor concurrency
 	stats := q.GetStats()
 	fmt.Printf("Queue stats - High: %d, Medium: %d, Low: %d, Delayed: %d/%d\n",
 		stats.HighQueueSize, stats.MediumQueueSize, stats.LowQueueSize,
 		stats.DelayedJobsCount, stats.MaxDelayedJobs)
+
+	fmt.Println("Executor stats:")
+	for jobType, execStats := range stats.ExecutorStats {
+		fmt.Printf("  %s: %d/%d active jobs\n", jobType, execStats.ActiveJobs, execStats.MaxJobs)
+	}
 
 	time.Sleep(2 * time.Second)
 	fmt.Println("Done!")

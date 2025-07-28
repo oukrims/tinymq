@@ -13,6 +13,7 @@ type ExecutorFunc = queue.ExecutorFunc
 type RetryConfig = queue.RetryConfig
 type Priority = queue.Priority
 type Config = queue.Config
+type ExecutorConfig = queue.ExecutorConfig
 
 const (
 	Low    = queue.Low
@@ -25,6 +26,7 @@ var NewHighPriorityJob = queue.NewHighPriorityJob
 var NewLowPriorityJob = queue.NewLowPriorityJob
 var DefaultRetryConfig = queue.DefaultRetryConfig
 var DefaultConfig = queue.DefaultConfig
+var DefaultExecutorConfig = queue.DefaultExecutorConfig
 
 var NewQueue = queue.NewJobQueue
 var NewQueueWithConfig = queue.NewJobQueueWithConfig
