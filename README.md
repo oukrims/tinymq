@@ -2,6 +2,8 @@
 
 A lightweight, high-performance in-memory job queue for Go with priority scheduling, delayed job execution, and configurable concurrency controls.
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/oukrims/tinymq@v0.1.1.svg)](https://pkg.go.dev/github.com/oukrims/tinymq@v0.1.1)
+
 ## Features
 
 * **Priority-based job scheduling** (High, Medium, Low)
