@@ -13,10 +13,11 @@ func main() {
 	logger := log.New(os.Stdout, "[tinymq] ", log.LstdFlags)
 	tinymq.SetLogger(logger)
 
-	// Example with custom scheduler interval for time-sensitive jobs
+	// Example with custom scheduler interval and memory limits
 	config := tinymq.Config{
 		BufferSize:        100,
 		SchedulerInterval: 50 * time.Millisecond, // More responsive than default 100ms
+		MaxDelayedJobs:    1000,                  // Limit delayed jobs to prevent memory issues
 	}
 	q := tinymq.NewQueueWithConfig(config)
 	defer q.Stop()
@@ -79,6 +80,13 @@ func main() {
 	q.Enqueue(*chainedJobPtr)
 
 	fmt.Println("\nWatching execution order (High → Medium → Low)...")
+
+	// Show queue stats
+	stats := q.GetStats()
+	fmt.Printf("Queue stats - High: %d, Medium: %d, Low: %d, Delayed: %d/%d\n",
+		stats.HighQueueSize, stats.MediumQueueSize, stats.LowQueueSize,
+		stats.DelayedJobsCount, stats.MaxDelayedJobs)
+
 	time.Sleep(2 * time.Second)
 	fmt.Println("Done!")
 }

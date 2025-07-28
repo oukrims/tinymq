@@ -49,6 +49,7 @@ type JobQueue struct {
 	delayedMu         sync.Mutex
 	stopCh            chan struct{}
 	schedulerInterval time.Duration
+	maxDelayedJobs    int
 }
 
 func NewJobQueue(bufferSize int) *JobQueue {
@@ -66,6 +67,7 @@ func NewJobQueueWithConfig(config Config) *JobQueue {
 		delayedJobs:       make(delayedQueue, 0),
 		stopCh:            make(chan struct{}),
 		schedulerInterval: config.SchedulerInterval,
+		maxDelayedJobs:    config.MaxDelayedJobs,
 	}
 	heap.Init(&jq.delayedJobs)
 	go jq.schedulerLoop()
@@ -131,6 +133,24 @@ func (jq *JobQueue) enqueueDelayed(job Job) {
 
 	if jq.store != nil {
 		_ = jq.store.Save(job)
+	}
+
+	// Check if we have a limit (0 means unlimited)
+	if jq.maxDelayedJobs > 0 {
+		// Check if we're at capacity
+		if jq.delayedJobs.Len() >= jq.maxDelayedJobs {
+			// Remove oldest job (earliest RunAt time)
+			if jq.delayedJobs.Len() > 0 {
+				oldest := heap.Pop(&jq.delayedJobs).(*scheduledJob)
+				shared.Logf("Delayed jobs at capacity (%d), dropping oldest job: %s (was scheduled for %v)",
+					jq.maxDelayedJobs, oldest.job.ID, oldest.runAt)
+			}
+		}
+
+		// Warn when approaching capacity
+		if jq.delayedJobs.Len() >= int(float64(jq.maxDelayedJobs)*0.9) {
+			shared.Logf("Delayed jobs queue approaching capacity: %d/%d", jq.delayedJobs.Len(), jq.maxDelayedJobs)
+		}
 	}
 
 	heap.Push(&jq.delayedJobs, &scheduledJob{
