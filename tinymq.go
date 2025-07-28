@@ -10,8 +10,10 @@ import (
 type Queue = queue.JobQueue
 type Job = queue.Job
 type ExecutorFunc = queue.ExecutorFunc
+type RetryConfig = queue.RetryConfig
 
 var NewJob = queue.NewJob
+var DefaultRetryConfig = queue.DefaultRetryConfig
 
 var NewQueue = queue.NewJobQueue
 var SetLogger = shared.SetLogger

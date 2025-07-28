@@ -154,6 +154,34 @@ func (jq *JobQueue) Stop() {
 	close(jq.queue)
 }
 
+func (jq *JobQueue) handleJobSuccess(job Job) {
+	shared.Logf("Job completed successfully: %s", job.ID)
+	if jq.store != nil {
+		_ = jq.store.Delete(job.ID)
+	}
+}
+
+func (jq *JobQueue) handleJobFailure(job Job, err error) {
+	job.LastError = err.Error()
+	job.Retries++
+
+	if job.Retries > job.RetryConfig.MaxRetries {
+		shared.Logf("Job failed permanently after %d retries: %s - %v", job.RetryConfig.MaxRetries, job.ID, err)
+		if jq.store != nil {
+			_ = jq.store.Delete(job.ID)
+		}
+		return
+	}
+
+	retryDelay := job.calculateRetryDelay()
+	job.RunAt = time.Now().Add(retryDelay)
+
+	shared.Logf("Job failed, scheduling retry %d/%d in %v: %s - %v",
+		job.Retries, job.RetryConfig.MaxRetries, retryDelay, job.ID, err)
+
+	jq.enqueueDelayed(job)
+}
+
 func (jq *JobQueue) worker(id int) {
 	for job := range jq.queue {
 		jq.mu.RLock()
@@ -162,10 +190,13 @@ func (jq *JobQueue) worker(id int) {
 
 		if exists {
 			go func(j Job) {
-				shared.Logf("[Worker %d] Executing job: %s", id, j.ID)
-				executor(j)
-				if jq.store != nil {
-					_ = jq.store.Delete(j.ID)
+				shared.Logf("[Worker %d] Executing job: %s (attempt %d)", id, j.ID, j.Retries+1)
+				err := executor(j)
+
+				if err != nil {
+					jq.handleJobFailure(j, err)
+				} else {
+					jq.handleJobSuccess(j)
 				}
 			}(job)
 		} else {

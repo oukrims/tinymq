@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"time"
 
@@ -16,32 +18,53 @@ func main() {
 	q := tinymq.NewQueue(100)
 	defer q.Stop()
 
-	q.RegisterExecutor("print", func(job tinymq.Job) {
-		fmt.Printf("[EXECUTOR] Job %s at %v: %v\n", job.ID, time.Now().Format("15:04:05.000"), job.Payload)
+	q.RegisterExecutor("reliable", func(job tinymq.Job) error {
+		fmt.Printf("[RELIABLE] Processing job %s: %v\n", job.ID, job.Payload)
+		return nil
 	})
 
-	q.StartDispatcher(4)
+	q.RegisterExecutor("flaky", func(job tinymq.Job) error {
+		fmt.Printf("[FLAKY] Attempt %d for job %s: %v\n", job.Retries+1, job.ID, job.Payload)
 
-	fmt.Println("Enqueueing immediate jobs...")
-	for i := 0; i < 3; i++ {
-		job := tinymq.NewJob("print", fmt.Sprintf("Immediate job %d", i))
-		q.Enqueue(job)
-	}
+		if rand.Float32() < 0.7 { // 70% failure rate
+			return errors.New("random failure occurred")
+		}
 
-	fmt.Println("Enqueueing delayed jobs...")
-	for i := 0; i < 3; i++ {
-		delay := time.Duration(i+1) * time.Second
-		job := tinymq.NewDelayedJob("print", fmt.Sprintf("Delayed job %d (delay: %v)", i, delay), delay)
-		q.Enqueue(job)
-	}
+		fmt.Printf("[FLAKY] Success on attempt %d!\n", job.Retries+1)
+		return nil
+	})
 
-	fmt.Println("Enqueueing jobs with EnqueueDelayed...")
-	for i := 0; i < 3; i++ {
-		delay := time.Duration(i*500) * time.Millisecond
-		job := tinymq.NewJob("print", fmt.Sprintf("EnqueueDelayed job %d (delay: %v)", i, delay))
-		q.EnqueueDelayed(job, delay)
-	}
+	q.RegisterExecutor("always-fails", func(job tinymq.Job) error {
+		fmt.Printf("[FAIL] Attempt %d for job %s: %v\n", job.Retries+1, job.ID, job.Payload)
+		return errors.New("this job always fails")
+	})
 
-	time.Sleep(5 * time.Second)
+	q.StartDispatcher(2)
+
+	// Reliable job
+	job1 := tinymq.NewJob("reliable", "This will work")
+	q.Enqueue(job1)
+
+	// Flaky job with default retry config
+	job2 := tinymq.NewJob("flaky", "This might work after retries")
+	q.Enqueue(job2)
+
+	// Flaky job with custom retry config
+	job3 := tinymq.NewJob("flaky", "Custom retry config")
+	job3.WithRetryConfig(tinymq.RetryConfig{
+		MaxRetries:      5,
+		InitialDelay:    200 * time.Millisecond,
+		MaxDelay:        2 * time.Second,
+		BackoffMultiple: 1.5,
+	})
+	q.Enqueue(job3)
+
+	// Job that will exhaust retries
+	job4 := tinymq.NewJob("always-fails", "This will fail permanently")
+	job4.WithMaxRetries(2)
+	q.Enqueue(job4)
+
+	fmt.Println("Jobs enqueued. Watching execution...")
+	time.Sleep(15 * time.Second)
 	fmt.Println("Done!")
 }
